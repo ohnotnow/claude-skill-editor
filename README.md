@@ -10,20 +10,14 @@ This tool finds your installed skills, lists them, and lets you pick one to edit
 
 ## Getting started
 
-You need Go 1.24+ installed.
+Grab a pre-built binary from the [releases page](https://github.com/ohnotnow/claude-skill-editor/releases), `chmod +x` it, and put it somewhere on your PATH. Binaries are available for macOS (Intel and Apple Silicon), Linux (amd64 and arm64), and Windows.
+
+Or build from source if you have Go 1.24+:
 
 ```bash
 git clone https://github.com/ohnotnow/claude-skill-editor.git
 cd claude-skill-editor
 go build -o skill-editor .
-```
-
-Move the binary somewhere on your PATH, or run it directly from the build directory.
-
-To build for a Linux colleague from your Mac:
-
-```bash
-GOOS=linux GOARCH=amd64 go build -o skill-editor-linux .
 ```
 
 ## Usage
