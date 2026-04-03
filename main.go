@@ -36,13 +36,17 @@ type skillFile struct {
 	absPath string
 }
 
-func skillsBaseDir() string {
+func cliSkillsDir() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".claude", "skills")
+}
+
+func desktopSkillsBaseDir() string {
 	switch runtime.GOOS {
 	case "darwin":
 		home, _ := os.UserHomeDir()
 		return filepath.Join(home, "Library", "Application Support", "Claude", "local-agent-mode-sessions", "skills-plugin")
 	case "linux":
-		// Try XDG_CONFIG_HOME first, then ~/.config
 		if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
 			return filepath.Join(xdg, "Claude", "local-agent-mode-sessions", "skills-plugin")
 		}
@@ -54,8 +58,44 @@ func skillsBaseDir() string {
 	}
 }
 
-func discoverSkills() ([]skill, error) {
-	base := skillsBaseDir()
+func discoverCLISkills() ([]skill, error) {
+	base := cliSkillsDir()
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read skills directory %s: %w", base, err)
+	}
+
+	profile := skillProfile{label: "cli", uuid: "cli", skillsDir: base}
+	var skills []skill
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		skillDir := filepath.Join(base, entry.Name())
+		skillMD := filepath.Join(skillDir, "SKILL.md")
+		if _, err := os.Stat(skillMD); err != nil {
+			continue
+		}
+		name, desc := parseSkillFrontmatter(skillMD)
+		if name == "" {
+			name = entry.Name()
+		}
+		skills = append(skills, skill{
+			name:        name,
+			description: desc,
+			dir:         skillDir,
+			profile:     profile,
+		})
+	}
+
+	sort.Slice(skills, func(i, j int) bool {
+		return skills[i].name < skills[j].name
+	})
+	return skills, nil
+}
+
+func discoverDesktopSkills() ([]skill, error) {
+	base := desktopSkillsBaseDir()
 	outerEntries, err := os.ReadDir(base)
 	if err != nil {
 		return nil, fmt.Errorf("cannot read skills directory %s: %w", base, err)
@@ -180,14 +220,66 @@ func listSkillFiles(skillDir string) []skillFile {
 	return files
 }
 
-func editorCmd() string {
+// openInFileManager opens a directory in the platform's file manager.
+func openInFileManager(dir string) error {
+	switch runtime.GOOS {
+	case "darwin":
+		return exec.Command("open", dir).Start()
+	case "linux":
+		if _, err := exec.LookPath("xdg-open"); err == nil {
+			return exec.Command("xdg-open", dir).Start()
+		}
+		// Try common file managers directly
+		for _, fm := range []string{"nautilus", "dolphin", "thunar", "nemo", "pcmanfm"} {
+			if _, err := exec.LookPath(fm); err == nil {
+				return exec.Command(fm, dir).Start()
+			}
+		}
+		return fmt.Errorf("no file manager found")
+	default:
+		return fmt.Errorf("unsupported platform: %s", runtime.GOOS)
+	}
+}
+
+// openInTerminalEditor uses $EDITOR/$VISUAL/nano — for CLI users who live in the terminal.
+func openInTerminalEditor(path string) *exec.Cmd {
 	if e := os.Getenv("EDITOR"); e != "" {
-		return e
+		return exec.Command(e, path)
 	}
 	if e := os.Getenv("VISUAL"); e != "" {
-		return e
+		return exec.Command(e, path)
 	}
-	return "nano"
+	return exec.Command("nano", path)
+}
+
+// openInGUIEditor tries GUI-friendly editors first, then falls back to $EDITOR/nano.
+// Returns the exec.Cmd ready to run.
+func openInGUIEditor(path string) *exec.Cmd {
+	switch runtime.GOOS {
+	case "darwin":
+		// "open -t" opens in the user's default plain-text editor (TextEdit usually)
+		return exec.Command("open", "-t", "-W", path)
+	case "linux":
+		// Try xdg-open first (respects desktop environment defaults)
+		if _, err := exec.LookPath("xdg-open"); err == nil {
+			return exec.Command("xdg-open", path)
+		}
+		// Try common GUI editors
+		for _, editor := range []string{"gedit", "kate", "mousepad", "xed", "pluma"} {
+			if _, err := exec.LookPath(editor); err == nil {
+				return exec.Command(editor, path)
+			}
+		}
+	}
+
+	// Fall back to $EDITOR / $VISUAL / nano
+	if e := os.Getenv("EDITOR"); e != "" {
+		return exec.Command(e, path)
+	}
+	if e := os.Getenv("VISUAL"); e != "" {
+		return exec.Command(e, path)
+	}
+	return exec.Command("nano", path)
 }
 
 // --- Bubble Tea model ---
@@ -229,11 +321,13 @@ type model struct {
 	width     int
 	height    int
 	quitting  bool
+	printPath string // set when user presses 'p' — printed after TUI exits
+	cliMode   bool   // true = ~/.claude/skills, terminal editor first
 }
 
 type editorFinishedMsg struct{ err error }
 
-func initialModel(skills []skill) model {
+func initialModel(skills []skill, cliMode bool) model {
 	// Determine if we have multiple profiles
 	profiles := map[string]bool{}
 	for _, s := range skills {
@@ -253,9 +347,14 @@ func initialModel(skills []skill) model {
 		Foreground(lipgloss.Color("#A78BFA")).
 		BorderLeftForeground(lipgloss.Color("#7C3AED"))
 
-	title := "Claude Desktop Skills"
-	if len(profiles) > 1 {
-		title = fmt.Sprintf("Claude Desktop Skills (%d profiles)", len(profiles))
+	var title string
+	if cliMode {
+		title = "Claude Code Skills (~/.claude/skills)"
+	} else {
+		title = "Claude Desktop Skills"
+		if len(profiles) > 1 {
+			title = fmt.Sprintf("Claude Desktop Skills (%d profiles)", len(profiles))
+		}
 	}
 
 	sl := list.New(items, delegate, 80, 24)
@@ -265,6 +364,8 @@ func initialModel(skills []skill) model {
 	sl.AdditionalShortHelpKeys = func() []key.Binding {
 		return []key.Binding{
 			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open skill")),
+			key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "open in finder")),
+			key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "print path")),
 		}
 	}
 
@@ -272,6 +373,7 @@ func initialModel(skills []skill) model {
 		view:      viewSkills,
 		skillList: sl,
 		skills:    skills,
+		cliMode:   cliMode,
 	}
 }
 
@@ -323,6 +425,40 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
+		case "p":
+			switch m.view {
+			case viewSkills:
+				if item, ok := m.skillList.SelectedItem().(skillItem); ok {
+					m.printPath = item.s.dir
+					m.quitting = true
+					return m, tea.Quit
+				}
+			case viewFiles:
+				if item, ok := m.fileList.SelectedItem().(fileItem); ok {
+					m.printPath = item.f.absPath
+					m.quitting = true
+					return m, tea.Quit
+				}
+			}
+
+		case "o":
+			// Open the skill folder in the system file manager
+			var dir string
+			switch m.view {
+			case viewSkills:
+				if item, ok := m.skillList.SelectedItem().(skillItem); ok {
+					dir = item.s.dir
+				}
+			case viewFiles:
+				if m.current != nil {
+					dir = m.current.dir
+				}
+			}
+			if dir != "" {
+				openInFileManager(dir) // fire and forget — it's a GUI app
+			}
+			return m, nil
+
 		case "enter":
 			switch m.view {
 			case viewSkills:
@@ -347,6 +483,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.fileList.AdditionalShortHelpKeys = func() []key.Binding {
 						return []key.Binding{
 							key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "edit file")),
+							key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "open folder")),
+							key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "print path")),
 							key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc/q", "back")),
 						}
 					}
@@ -355,8 +493,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			case viewFiles:
 				if item, ok := m.fileList.SelectedItem().(fileItem); ok {
-					editor := editorCmd()
-					c := exec.Command(editor, item.f.absPath)
+					var c *exec.Cmd
+					if m.cliMode {
+						c = openInTerminalEditor(item.f.absPath)
+					} else {
+						c = openInGUIEditor(item.f.absPath)
+					}
 					c.Stdin = os.Stdin
 					c.Stdout = os.Stdout
 					c.Stderr = os.Stderr
@@ -394,29 +536,90 @@ func (m model) View() string {
 // --- Main ---
 
 func main() {
-	skills, err := discoverSkills()
+	// Parse flags: pull out --cli early so it combines with other flags
+	cliMode := false
+	args := []string{}
+	for _, a := range os.Args[1:] {
+		if a == "--cli" {
+			cliMode = true
+		} else {
+			args = append(args, a)
+		}
+	}
+
+	// Discover skills based on mode
+	var skills []skill
+	var err error
+	var baseDir string
+	if cliMode {
+		baseDir = cliSkillsDir()
+		skills, err = discoverCLISkills()
+	} else {
+		baseDir = desktopSkillsBaseDir()
+		skills, err = discoverDesktopSkills()
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		fmt.Fprintf(os.Stderr, "\nMake sure the Claude Desktop app is installed and you have skills set up.\n")
 		os.Exit(1)
 	}
 	if len(skills) == 0 {
-		fmt.Fprintln(os.Stderr, "No skills found in the Claude Desktop app.")
-		fmt.Fprintf(os.Stderr, "Expected location: %s\n", skillsBaseDir())
+		fmt.Fprintln(os.Stderr, "No skills found.")
+		fmt.Fprintf(os.Stderr, "Expected location: %s\n", baseDir)
 		os.Exit(1)
 	}
 
-	// Quick non-interactive list mode
-	if len(os.Args) > 1 && os.Args[1] == "--list" {
-		for _, s := range skills {
-			fmt.Printf("%-20s [%s] %s\n", s.name, s.profile.label, s.description)
+	if len(args) > 0 {
+		switch args[0] {
+		case "--help", "-h":
+			fmt.Println("skill-editor — browse and edit Claude skills")
+			fmt.Println()
+			fmt.Println("Usage:")
+			fmt.Println("  skill-editor              Browse Claude Desktop skills (GUI editor)")
+			fmt.Println("  skill-editor --cli        Browse Claude Code skills ($EDITOR)")
+			fmt.Println("  skill-editor --list       List all skills (non-interactive)")
+			fmt.Println("  skill-editor --cli --list List CLI skills (non-interactive)")
+			fmt.Println("  skill-editor --open       Open skills directory in file manager")
+			fmt.Println("  skill-editor --help       Show this help")
+			fmt.Println()
+			fmt.Println("TUI keys:")
+			fmt.Println("  enter   Open skill / edit file")
+			fmt.Println("  o       Open skill folder in file manager")
+			fmt.Println("  p       Print path and exit")
+			fmt.Println("  /       Filter list")
+			fmt.Println("  esc/q   Back / quit")
+			return
+		case "--list":
+			for _, s := range skills {
+				if cliMode {
+					fmt.Printf("%-20s %s\n", s.name, s.description)
+				} else {
+					fmt.Printf("%-20s [%s] %s\n", s.name, s.profile.label, s.description)
+				}
+			}
+			return
+		case "--open":
+			if err := openInFileManager(baseDir); err != nil {
+				fmt.Fprintf(os.Stderr, "Could not open file manager: %v\n", err)
+				fmt.Fprintf(os.Stderr, "Skills directory: %s\n", baseDir)
+				os.Exit(1)
+			}
+			fmt.Printf("Opened %s\n", baseDir)
+			return
+		default:
+			fmt.Fprintf(os.Stderr, "Unknown flag: %s\nTry: skill-editor --help\n", args[0])
+			os.Exit(1)
 		}
-		return
 	}
 
-	p := tea.NewProgram(initialModel(skills), tea.WithAltScreen())
-	if _, err := p.Run(); err != nil {
+	prog := tea.NewProgram(initialModel(skills, cliMode), tea.WithAltScreen())
+	finalModel, err := prog.Run()
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error running TUI: %v\n", err)
 		os.Exit(1)
+	}
+
+	// If the user pressed 'p', the TUI is fully torn down now — safe to print
+	if m, ok := finalModel.(model); ok && m.printPath != "" {
+		fmt.Println(m.printPath)
 	}
 }
