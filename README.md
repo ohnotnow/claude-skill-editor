@@ -57,6 +57,15 @@ skill-editor --help         Show all options
 
 The `p` key is handy when you just want the path. The TUI tears down cleanly before printing, so you can pipe or copy the output.
 
+### Shell aliases
+
+Add one or both to your `.bashrc` / `.zshrc`:
+
+```bash
+alias cse='skill-editor --cli'    # CLI skills, opens in $EDITOR
+alias csed='skill-editor'         # Desktop skills, opens in GUI editor
+```
+
 ## Where skills actually live
 
 Desktop app skills are buried under a platform-specific path with two levels of UUID subdirectories:
