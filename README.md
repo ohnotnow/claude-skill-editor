@@ -6,6 +6,8 @@ A TUI for browsing and editing Claude skills — Desktop app and Claude Code CLI
 
 The Claude Desktop app lets you install skills but gives you no way to edit them afterwards. Want to fix a typo? Re-upload a zip. Every time. The files are buried under two levels of UUID directories, so good luck finding them by hand.
 
+Also, even on the CLI I get annoyed having to type `vim ~/.claude/skills/....` realising I've forgotten the name, `ls`, `vim ...`.  
+
 This tool finds your installed skills, lists them, and lets you pick one to edit. It handles both the Desktop app's UUID maze and the CLI's simpler `~/.claude/skills/` folder.
 
 ## Getting started
