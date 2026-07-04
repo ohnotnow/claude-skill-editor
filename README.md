@@ -2,6 +2,8 @@
 
 A TUI for browsing and editing Claude skills, and for controlling how they're presented to Claude — Desktop app and Claude Code CLI.
 
+![screenshot](screenshot.png)
+
 ## Why this exists
 
 The Claude Desktop app lets you install skills but gives you no way to edit them afterwards. Want to fix a typo? Re-upload a zip. Every time. The files are buried under two levels of UUID directories, so good luck finding them by hand.
