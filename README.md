@@ -1,6 +1,6 @@
 # claude-skill-editor
 
-A TUI for browsing and editing Claude skills — Desktop app and Claude Code CLI.
+A TUI for browsing and editing Claude skills, and for controlling how they're presented to Claude — Desktop app and Claude Code CLI.
 
 ## Why this exists
 
@@ -9,6 +9,8 @@ The Claude Desktop app lets you install skills but gives you no way to edit them
 Also, even on the CLI I get annoyed having to type `vim ~/.claude/skills/....` realising I've forgotten the name, `ls`, `vim ...`.  
 
 This tool finds your installed skills, lists them, and lets you pick one to edit. It handles both the Desktop app's UUID maze and the CLI's simpler `~/.claude/skills/` folder.
+
+More recently I've wanted to control how much of each skill Claude actually sees at the start of a session — Claude Code's `skillOverrides` setting, where a skill can be fully on, name-only, hidden-but-runnable, or off entirely. There's a built-in editor for it, but it makes you *cycle* through the options one skill at a time, which is death by a thousand keypresses when you've a dozen to change. So this grew a filterable table where a single number key sets a skill's mode.
 
 ## Getting started
 
@@ -53,9 +55,28 @@ skill-editor --help         Show all options
 | o | Open the skill folder in your file manager |
 | p | Print the full path and exit (useful for scripting) |
 | / | Filter the list |
+| m | Manage skill presentation modes (`--cli` only) |
+| 1–4 | Set a skill's presentation mode (in the modes view, or a skill's file list) |
 | esc, q | Go back / quit |
 
 The `p` key is handy when you just want the path. The TUI tears down cleanly before printing, so you can pipe or copy the output.
+
+### Presentation modes (`--cli`)
+
+Claude Code decides how much of each skill it surfaces to itself via the `skillOverrides` map in `~/.claude/settings.json`. In `--cli` mode, press `m` for a filterable table of every skill and its current mode:
+
+| Key | Mode | What Claude sees |
+|-----|------|------------------|
+| `1` | on | Name and description (the default) |
+| `2` | name-only | Name only |
+| `3` | user-invocable-only | Nothing — but you can still run it yourself with `/skill-name` |
+| `4` | off | Nothing; hidden entirely |
+
+Move or filter to a skill, hit `1`–`4` to set its mode, then `q` to leave. If you changed anything you'll get a save prompt (`y`/`enter` to save, `n` to discard, `esc` to keep editing) — skim without changing and it won't nag. Setting a skill to `on` simply removes its override, since a skill that's absent from `skillOverrides` is already treated as `on`, so your settings file stays tidy.
+
+You can also set the mode for a single skill straight from its file list: open it with `enter`, then press `1`–`4`. That path saves immediately.
+
+Only the `skillOverrides` block is rewritten — everything else in `settings.json` is left untouched. One caveat: Go's JSON encoder sorts the top-level keys alphabetically when it saves, so don't be alarmed if `permissions` and friends shuffle order.
 
 ### Shell aliases
 

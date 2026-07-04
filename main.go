@@ -454,6 +454,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.enterOverrides()
 			}
 
+		case "1", "2", "3", "4":
+			if m.view == viewFiles && m.cliMode {
+				if mode, ok := presentationModeForKey(msg.String()); ok {
+					return m.setCurrentSkillMode(mode)
+				}
+			}
+
 		case "p":
 			switch m.view {
 			case viewSkills:
@@ -495,6 +502,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					s := item.s
 					m.current = &s
 					m.view = viewFiles
+					// In --cli mode, load settings so the file screen can show
+					// and set this skill's presentation mode. Best-effort — file
+					// editing still works with no settings.json.
+					if m.cliMode {
+						m.settings, _ = loadSkillSettings(settingsPath())
+					}
 					files := listSkillFiles(s.dir)
 					items := make([]list.Item, len(files))
 					for i, f := range files {
@@ -506,16 +519,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						Foreground(lipgloss.Color("#7C3AED")).
 						BorderLeftForeground(lipgloss.Color("#7C3AED"))
 					m.fileList = list.New(items, delegate, m.width, m.height)
-					m.fileList.Title = fmt.Sprintf("%s  files", s.name)
+					m.fileList.Title = m.fileTitle(s.name)
 					m.fileList.SetShowStatusBar(true)
 					m.fileList.SetFilteringEnabled(true)
+					cli := m.cliMode
 					m.fileList.AdditionalShortHelpKeys = func() []key.Binding {
-						return []key.Binding{
+						b := []key.Binding{
 							key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "edit file")),
 							key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "open folder")),
 							key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "print path")),
 							key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc/q", "back")),
 						}
+						if cli {
+							b = append(b, key.NewBinding(key.WithKeys("1", "2", "3", "4"), key.WithHelp("1-4", "set mode")))
+						}
+						return b
 					}
 					return m, nil
 				}
@@ -609,7 +627,7 @@ func main() {
 	if len(args) > 0 {
 		switch args[0] {
 		case "--help", "-h":
-			fmt.Println("skill-editor — browse and edit Claude skills")
+			fmt.Println("skill-editor — browse, edit, and set the presentation of Claude skills")
 			fmt.Println()
 			fmt.Println("Usage:")
 			fmt.Println("  skill-editor              Browse Claude Desktop skills (GUI editor)")
@@ -624,6 +642,8 @@ func main() {
 			fmt.Println("  o       Open skill folder in file manager")
 			fmt.Println("  p       Print path and exit")
 			fmt.Println("  /       Filter list")
+			fmt.Println("  m       Manage skill presentation modes (--cli)")
+			fmt.Println("  1-4     Set a skill's presentation mode")
 			fmt.Println("  esc/q   Back / quit")
 			return
 		case "--list":

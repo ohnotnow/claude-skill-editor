@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +14,8 @@ func keyMsg(s string) tea.KeyMsg {
 	switch s {
 	case "esc":
 		return tea.KeyMsg{Type: tea.KeyEsc}
+	case "enter":
+		return tea.KeyMsg{Type: tea.KeyEnter}
 	case "ctrl+c":
 		return tea.KeyMsg{Type: tea.KeyCtrlC}
 	default:
@@ -108,6 +111,26 @@ func TestOverrideDirtyQuitPromptsThenSaves(t *testing.T) {
 	}
 	if s.mode("alpha") != modeOff {
 		t.Error("save did not persist alpha=off to the file")
+	}
+}
+
+func TestOverrideDirtyQuitEnterAlsoSaves(t *testing.T) {
+	m, path := enterOverviewForTest(t, `{"skillOverrides":{}}`, twoSkills)
+	m = applyKey(t, m, "4") // alpha -> off, dirty
+	m = applyKey(t, m, "q") // prompt
+	if !m.confirmingSave {
+		t.Fatal("expected the save prompt after a dirty quit")
+	}
+	m = applyKey(t, m, "enter") // enter should confirm the save, same as y
+	if m.view != viewSkills || m.dirty || m.confirmingSave {
+		t.Errorf("enter should save and leave: view=%d dirty=%v confirming=%v", m.view, m.dirty, m.confirmingSave)
+	}
+	s, err := loadSkillSettings(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.mode("alpha") != modeOff {
+		t.Error("enter-confirm did not persist the change")
 	}
 }
 
@@ -217,5 +240,77 @@ func TestOverrideFilterNarrowsList(t *testing.T) {
 	}
 	if it, ok := vis[0].(overrideItem); !ok || it.name != "beta" {
 		t.Errorf("expected the visible match to be beta, got %#v", vis[0])
+	}
+}
+
+// enterFileScreenForTest points $HOME at a fixture, then drives a real model
+// into the file screen for the first skill (via enter), so the file-screen
+// settings-load path is exercised against the fixture.
+func enterFileScreenForTest(t *testing.T, settingsJSON string, skills []skill) (model, string) {
+	t.Helper()
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(home, ".claude", "settings.json")
+	if err := os.WriteFile(path, []byte(settingsJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+
+	var m tea.Model = initialModel(skills, true)
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	mm := applyKey(t, m, "enter")
+	if mm.view != viewFiles {
+		t.Fatalf("enter did not open the file screen (view=%d)", mm.view)
+	}
+	return mm, path
+}
+
+func TestFileScreenSetModeSavesImmediately(t *testing.T) {
+	skills := []skill{
+		{name: "alpha", dir: t.TempDir()},
+		{name: "beta", dir: t.TempDir()},
+	}
+	m, path := enterFileScreenForTest(t, `{"skillOverrides":{}}`, skills)
+	if m.settings == nil {
+		t.Fatal("entering the file screen in --cli mode should load settings")
+	}
+
+	m = applyKey(t, m, "4") // alpha (the open skill) -> off, saved immediately
+	if m.settings.mode("alpha") != modeOff {
+		t.Errorf("alpha in memory = %q, want off", m.settings.mode("alpha"))
+	}
+	s, err := loadSkillSettings(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.mode("alpha") != modeOff {
+		t.Error("a file-screen mode change should be saved to disk immediately")
+	}
+}
+
+func TestFileScreenTitleShowsMode(t *testing.T) {
+	skills := []skill{{name: "alpha", dir: t.TempDir()}}
+	m, _ := enterFileScreenForTest(t, `{"skillOverrides":{"alpha":"off"}}`, skills)
+	if !strings.Contains(m.fileList.Title, "off") {
+		t.Errorf("file-screen title should show the current mode, got %q", m.fileList.Title)
+	}
+}
+
+func TestFileScreenModeKeysInertInDesktopMode(t *testing.T) {
+	skills := []skill{{name: "alpha", dir: t.TempDir()}}
+	var m tea.Model = initialModel(skills, false) // desktop mode
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	mm := applyKey(t, m, "enter")
+	if mm.view != viewFiles {
+		t.Fatalf("enter should open the file screen, view=%d", mm.view)
+	}
+	if mm.settings != nil {
+		t.Error("desktop mode should not load skill settings")
+	}
+	mm = applyKey(t, mm, "4") // should be inert, not navigate or crash
+	if mm.view != viewFiles {
+		t.Error("mode keys should do nothing in desktop mode")
 	}
 }

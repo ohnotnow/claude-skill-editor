@@ -174,7 +174,7 @@ func (m model) updateOverrides(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	if m.confirmingSave {
 		switch msg.String() {
-		case "y", "Y":
+		case "y", "Y", "enter":
 			if err := m.settings.save(); err != nil {
 				m.confirmingSave = false
 				return m, m.overrideList.NewStatusMessage("Save failed: " + err.Error())
@@ -198,15 +198,10 @@ func (m model) updateOverrides(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil // swallow everything else while confirming
 	}
 
+	if mode, ok := presentationModeForKey(msg.String()); ok {
+		return m.setSelectedMode(mode)
+	}
 	switch msg.String() {
-	case "1":
-		return m.setSelectedMode(modeOn)
-	case "2":
-		return m.setSelectedMode(modeNameOnly)
-	case "3":
-		return m.setSelectedMode(modeUserInvocable)
-	case "4":
-		return m.setSelectedMode(modeOff)
 	case "q", "esc":
 		if m.dirty {
 			m.confirmingSave = true
@@ -235,6 +230,52 @@ func (m model) setSelectedMode(mode presentationMode) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// presentationModeForKey maps the number keys 1-4 to their modes. Shared by the
+// overview screen and the per-skill file-screen hotkey.
+func presentationModeForKey(s string) (presentationMode, bool) {
+	switch s {
+	case "1":
+		return modeOn, true
+	case "2":
+		return modeNameOnly, true
+	case "3":
+		return modeUserInvocable, true
+	case "4":
+		return modeOff, true
+	}
+	return modeOn, false
+}
+
+// setCurrentSkillMode sets the mode of the skill currently open on the file
+// screen and saves immediately — the file screen is about one skill, so a
+// single keypress commits it (unlike the overview, which batches and prompts).
+// Shows a transient status line and refreshes the title so the effect is clear.
+func (m model) setCurrentSkillMode(mode presentationMode) (tea.Model, tea.Cmd) {
+	if m.current == nil {
+		return m, nil
+	}
+	if m.settings == nil {
+		return m, m.fileList.NewStatusMessage("No settings.json found — cannot set mode")
+	}
+	if !m.settings.setMode(m.current.name, mode) {
+		return m, m.fileList.NewStatusMessage(fmt.Sprintf("Already %s", mode))
+	}
+	if err := m.settings.save(); err != nil {
+		return m, m.fileList.NewStatusMessage("Save failed: " + err.Error())
+	}
+	m.fileList.Title = m.fileTitle(m.current.name)
+	return m, m.fileList.NewStatusMessage(fmt.Sprintf("Set to %s (saved)", mode))
+}
+
+// fileTitle builds the file-screen title, appending the skill's current
+// presentation mode when settings are loaded (--cli only).
+func (m model) fileTitle(name string) string {
+	if m.cliMode && m.settings != nil {
+		return fmt.Sprintf("%s  files  ·  %s", name, m.settings.mode(name))
+	}
+	return fmt.Sprintf("%s  files", name)
+}
+
 // overrideConfirmView is the "save changes?" prompt shown when leaving the
 // overview with unsaved edits.
 func (m model) overrideConfirmView() string {
@@ -242,7 +283,7 @@ func (m model) overrideConfirmView() string {
 		lipgloss.Center,
 		stylePromptTitle.Render("Save changes to skill presentation modes?"),
 		"",
-		stylePromptHelp.Render("y  save     n  discard     esc  keep editing"),
+		stylePromptHelp.Render("y/enter  save     n  discard     esc  keep editing"),
 	)
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, body)
 }
