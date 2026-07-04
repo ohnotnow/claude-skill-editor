@@ -168,6 +168,8 @@ func parseSkillFrontmatter(path string) (name, description string) {
 	}
 	defer f.Close()
 
+	// Collect the frontmatter block (the lines between the first pair of ---).
+	var fm []string
 	scanner := bufio.NewScanner(f)
 	inFrontmatter := false
 	for scanner.Scan() {
@@ -179,22 +181,55 @@ func parseSkillFrontmatter(path string) (name, description string) {
 			inFrontmatter = true
 			continue
 		}
-		if !inFrontmatter {
-			continue
+		if inFrontmatter {
+			fm = append(fm, line)
 		}
-		if strings.HasPrefix(line, "name:") {
+	}
+
+	for i, line := range fm {
+		switch {
+		case strings.HasPrefix(line, "name:"):
 			name = strings.TrimSpace(strings.TrimPrefix(line, "name:"))
-		} else if strings.HasPrefix(line, "description:") {
-			description = strings.TrimSpace(strings.TrimPrefix(line, "description:"))
-			// Strip surrounding quotes if present
-			description = strings.Trim(description, "\"'")
-			// Truncate long descriptions for display
-			if len(description) > 120 {
-				description = description[:117] + "..."
+		case strings.HasPrefix(line, "description:"):
+			val := strings.TrimSpace(strings.TrimPrefix(line, "description:"))
+			if val != "" && (val[0] == '>' || val[0] == '|') {
+				// YAML block scalar (folded > or literal |): the text is on the
+				// following, more-indented lines. Fold them into one inline
+				// string for our single-line, truncated display.
+				description = foldBlockScalar(fm, i+1)
+			} else {
+				description = strings.Trim(val, "\"'") // strip surrounding quotes
 			}
 		}
 	}
+
+	// Truncate long descriptions for display.
+	if len(description) > 120 {
+		description = description[:117] + "..."
+	}
 	return name, description
+}
+
+// foldBlockScalar joins the indented continuation lines of a YAML block scalar
+// (starting at index start) into one space-separated string. Good enough for a
+// truncated, single-line display — folded/literal newline semantics don't
+// matter once it's collapsed to one line.
+func foldBlockScalar(lines []string, start int) string {
+	if start >= len(lines) {
+		return ""
+	}
+	var parts []string
+	for _, line := range lines[start:] {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue // blank line within the block
+		}
+		if line[0] != ' ' && line[0] != '\t' {
+			break // dedented to a new key — the block is over
+		}
+		parts = append(parts, trimmed)
+	}
+	return strings.Join(parts, " ")
 }
 
 func listSkillFiles(skillDir string) []skillFile {

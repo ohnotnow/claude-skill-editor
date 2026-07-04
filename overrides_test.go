@@ -246,3 +246,77 @@ func TestLoadMissingFile(t *testing.T) {
 		t.Error("expected an error for a missing settings file")
 	}
 }
+
+func writeSkillMD(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "SKILL.md")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write SKILL.md: %v", err)
+	}
+	return path
+}
+
+func TestParseFrontmatterDescription(t *testing.T) {
+	cases := []struct {
+		name string
+		md   string
+		want string
+	}{
+		{
+			name: "inline",
+			md:   "---\nname: foo\ndescription: A simple description\n---\nbody",
+			want: "A simple description",
+		},
+		{
+			name: "quoted inline",
+			md:   "---\nname: foo\ndescription: \"Quoted description\"\n---\n",
+			want: "Quoted description",
+		},
+		{
+			name: "folded block",
+			md:   "---\nname: foo\ndescription: >\n  A folded description that\n  spans two lines\n---\n",
+			want: "A folded description that spans two lines",
+		},
+		{
+			name: "literal block",
+			md:   "---\nname: foo\ndescription: |\n  Line one\n  Line two\n---\n",
+			want: "Line one Line two",
+		},
+		{
+			name: "folded with chomp indicator",
+			md:   "---\nname: foo\ndescription: >-\n  Chomped folded\n  description\n---\n",
+			want: "Chomped folded description",
+		},
+		{
+			name: "block ends at the next key",
+			md:   "---\ndescription: >\n  Only this line\nname: foo\n---\n",
+			want: "Only this line",
+		},
+		{
+			name: "blank line inside a block is skipped",
+			md:   "---\ndescription: |\n  First para\n\n  Second para\n---\n",
+			want: "First para Second para",
+		},
+		{
+			name: "long inline is truncated",
+			md:   "---\ndescription: " + strings.Repeat("x", 200) + "\n---\n",
+			want: strings.Repeat("x", 117) + "...",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, desc := parseSkillFrontmatter(writeSkillMD(t, tc.md))
+			if desc != tc.want {
+				t.Errorf("description = %q, want %q", desc, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseFrontmatterName(t *testing.T) {
+	name, _ := parseSkillFrontmatter(writeSkillMD(t,
+		"---\ndescription: >\n  folded text here\nname: my-skill\n---\n"))
+	if name != "my-skill" {
+		t.Errorf("name = %q, want my-skill (a block-scalar description must not swallow the name key)", name)
+	}
+}
