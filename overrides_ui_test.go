@@ -35,12 +35,11 @@ func applyKey(t *testing.T, m tea.Model, s string) model {
 
 var twoSkills = []skill{{name: "alpha"}, {name: "beta"}}
 
-// enterOverviewForTest points $HOME at a fixture, then drives a real model
-// through startup and the `m` keypress so the whole entry path (including
-// enterOverrides + loadSkillSettings) is exercised against the fixture rather
-// than the real ~/.claude/settings.json. Returns the model on the overview
-// screen and the fixture path.
-func enterOverviewForTest(t *testing.T, settingsJSON string, skills []skill) (model, string) {
+// homeModelForTest points $HOME at a settings fixture and builds a real model on
+// the home screen (the table). initialModel loads settings from $HOME in --cli
+// mode, so the mode column and 1-4 keys are exercised against the fixture rather
+// than the real ~/.claude/settings.json.
+func homeModelForTest(t *testing.T, settingsJSON string, cliMode bool, skills []skill) (model, string) {
 	t.Helper()
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
@@ -52,127 +51,58 @@ func enterOverviewForTest(t *testing.T, settingsJSON string, skills []skill) (mo
 	}
 	t.Setenv("HOME", home)
 
-	var m tea.Model = initialModel(skills, true)
+	var m tea.Model = initialModel(skills, cliMode)
 	m, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
-	mm := applyKey(t, m, "m")
-	if mm.view != viewOverrides {
-		t.Fatalf("pressing m did not enter the overview (view=%d)", mm.view)
-	}
-	return mm, path
+	return m.(model), path
 }
 
-func TestOverrideSetMarksDirty(t *testing.T) {
-	m, _ := enterOverviewForTest(t, `{"skillOverrides":{}}`, twoSkills)
-	if m.dirty {
-		t.Fatal("a fresh overview should not be dirty")
+func TestHomeSetModeSavesImmediately(t *testing.T) {
+	m, path := homeModelForTest(t, `{"skillOverrides":{}}`, true, twoSkills)
+	if m.settings == nil {
+		t.Fatal("the cli home screen should load settings at startup")
 	}
-	m = applyKey(t, m, "4") // alpha (first row) -> off
-	if !m.dirty {
-		t.Error("setting a mode should mark the model dirty")
-	}
+
+	m = applyKey(t, m, "4") // alpha (first row) -> off, saved immediately
 	if got := m.settings.mode("alpha"); got != modeOff {
-		t.Errorf("alpha = %q, want off", got)
-	}
-}
-
-func TestOverrideSetToCurrentIsNoOp(t *testing.T) {
-	m, _ := enterOverviewForTest(t, `{"skillOverrides":{}}`, twoSkills)
-	m = applyKey(t, m, "1") // alpha is already on
-	if m.dirty {
-		t.Error("setting a skill to its current mode should not mark dirty")
-	}
-}
-
-func TestOverrideCleanQuitReturnsToSkills(t *testing.T) {
-	m, _ := enterOverviewForTest(t, `{"skillOverrides":{}}`, twoSkills)
-	m = applyKey(t, m, "q")
-	if m.view != viewSkills {
-		t.Errorf("a clean quit should return to the skill list, view=%d", m.view)
-	}
-	if m.confirmingSave {
-		t.Error("a clean quit should not raise the save prompt")
-	}
-}
-
-func TestOverrideDirtyQuitPromptsThenSaves(t *testing.T) {
-	m, path := enterOverviewForTest(t, `{"skillOverrides":{}}`, twoSkills)
-	m = applyKey(t, m, "4") // alpha -> off, now dirty
-	m = applyKey(t, m, "q") // should prompt, not leave
-	if !m.confirmingSave || m.view != viewOverrides {
-		t.Fatalf("a dirty quit should prompt and stay on the overview")
-	}
-	m = applyKey(t, m, "y") // save
-	if m.view != viewSkills || m.dirty || m.confirmingSave {
-		t.Errorf("after save: view=%d dirty=%v confirming=%v", m.view, m.dirty, m.confirmingSave)
+		t.Errorf("alpha in memory = %q, want off", got)
 	}
 	s, err := loadSkillSettings(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if s.mode("alpha") != modeOff {
-		t.Error("save did not persist alpha=off to the file")
+		t.Error("a home mode change should be saved to disk immediately")
 	}
 }
 
-func TestOverrideDirtyQuitEnterAlsoSaves(t *testing.T) {
-	m, path := enterOverviewForTest(t, `{"skillOverrides":{}}`, twoSkills)
-	m = applyKey(t, m, "4") // alpha -> off, dirty
-	m = applyKey(t, m, "q") // prompt
-	if !m.confirmingSave {
-		t.Fatal("expected the save prompt after a dirty quit")
-	}
-	m = applyKey(t, m, "enter") // enter should confirm the save, same as y
-	if m.view != viewSkills || m.dirty || m.confirmingSave {
-		t.Errorf("enter should save and leave: view=%d dirty=%v confirming=%v", m.view, m.dirty, m.confirmingSave)
-	}
+func TestHomeSetToCurrentModeWritesNothing(t *testing.T) {
+	m, path := homeModelForTest(t, `{"skillOverrides":{}}`, true, twoSkills)
+	m = applyKey(t, m, "1") // alpha is already on (absent)
 	s, err := loadSkillSettings(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.mode("alpha") != modeOff {
-		t.Error("enter-confirm did not persist the change")
+	if _, ok := s.overrides["alpha"]; ok {
+		t.Error("setting an already-on skill to on should not write an override")
 	}
 }
 
-func TestOverrideDiscardDoesNotPersist(t *testing.T) {
-	m, path := enterOverviewForTest(t, `{"skillOverrides":{}}`, twoSkills)
-	m = applyKey(t, m, "4") // alpha -> off, dirty
-	m = applyKey(t, m, "q")
-	m = applyKey(t, m, "n") // discard
+func TestHomeQuitDoesNotPrompt(t *testing.T) {
+	m, _ := homeModelForTest(t, `{"skillOverrides":{}}`, true, twoSkills)
+	next, _ := m.Update(keyMsg("q"))
+	if !next.(model).quitting {
+		t.Error("q on the home screen should quit immediately (no save prompt)")
+	}
+}
+
+func TestHomeModeKeysInertInDesktopMode(t *testing.T) {
+	m, _ := homeModelForTest(t, `{"skillOverrides":{}}`, false, []skill{{name: "alpha"}})
+	if m.settings != nil {
+		t.Error("desktop mode should not load skill settings")
+	}
+	m = applyKey(t, m, "4") // inert
 	if m.view != viewSkills {
-		t.Errorf("discard should return to the skill list, view=%d", m.view)
-	}
-	s, _ := loadSkillSettings(path)
-	if s.mode("alpha") != modeOn {
-		t.Error("discard should not have written a change to the file")
-	}
-}
-
-func TestOverrideEscCancelsConfirm(t *testing.T) {
-	m, _ := enterOverviewForTest(t, `{"skillOverrides":{}}`, twoSkills)
-	m = applyKey(t, m, "4")   // dirty
-	m = applyKey(t, m, "q")   // prompt
-	m = applyKey(t, m, "esc") // cancel the prompt
-	if m.confirmingSave {
-		t.Error("esc should dismiss the save prompt")
-	}
-	if m.view != viewOverrides {
-		t.Error("esc at the prompt should keep us on the overview")
-	}
-	if !m.dirty {
-		t.Error("esc should keep the unsaved change pending")
-	}
-}
-
-func TestOverrideDigitDuringFilterDoesNotSetMode(t *testing.T) {
-	m, _ := enterOverviewForTest(t, `{"skillOverrides":{}}`, twoSkills)
-	m = applyKey(t, m, "/") // start filtering
-	m = applyKey(t, m, "4") // alpha is on; if this leaked to mode-setting it would flip to off
-	if m.dirty {
-		t.Error("a digit typed into the filter must not change a mode")
-	}
-	if m.settings.mode("alpha") != modeOn {
-		t.Error("filtering keystroke leaked into mode-setting")
+		t.Error("mode keys should do nothing on the desktop home screen")
 	}
 }
 
@@ -214,14 +144,14 @@ func runCmdTree(t *testing.T, m model, cmd tea.Cmd) model {
 }
 
 // Regression test for the dropped-FilterMatchesMsg bug: filtering must actually
-// narrow the overview list, not just accept typed input.
-func TestOverrideFilterNarrowsList(t *testing.T) {
+// narrow the home table, not just accept typed input.
+func TestHomeFilterNarrowsList(t *testing.T) {
 	skills := []skill{
 		{name: "alpha", description: "the first one"},
 		{name: "beta", description: "the second one"},
 		{name: "gamma", description: "the third one"},
 	}
-	m, _ := enterOverviewForTest(t, `{"skillOverrides":{}}`, skills)
+	m, _ := homeModelForTest(t, `{"skillOverrides":{}}`, true, skills)
 
 	var next tea.Model = m
 	next, _ = next.Update(keyMsg("/")) // open the filter
@@ -234,32 +164,29 @@ func TestOverrideFilterNarrowsList(t *testing.T) {
 	}
 	m = runCmdTree(t, m, cmd) // apply the async filter
 
-	vis := m.overrideList.VisibleItems()
+	vis := m.skillList.VisibleItems()
 	if len(vis) != 1 {
 		t.Fatalf("expected 1 visible item after filtering \"beta\", got %d", len(vis))
 	}
-	if it, ok := vis[0].(overrideItem); !ok || it.name != "beta" {
+	if it, ok := vis[0].(skillRow); !ok || it.s.name != "beta" {
 		t.Errorf("expected the visible match to be beta, got %#v", vis[0])
 	}
 }
 
-// enterFileScreenForTest points $HOME at a fixture, then drives a real model
-// into the file screen for the first skill (via enter), so the file-screen
-// settings-load path is exercised against the fixture.
+func TestHomeDigitDuringFilterDoesNotSetMode(t *testing.T) {
+	m, _ := homeModelForTest(t, `{"skillOverrides":{}}`, true, twoSkills)
+	m = applyKey(t, m, "/") // start filtering
+	m = applyKey(t, m, "4") // alpha is on; if this leaked to mode-setting it would flip to off
+	if m.settings.mode("alpha") != modeOn {
+		t.Error("a digit typed into the filter must not set a mode")
+	}
+}
+
+// enterFileScreenForTest builds a home model against a fixture, then drives into
+// the file screen for the first skill (via enter).
 func enterFileScreenForTest(t *testing.T, settingsJSON string, skills []skill) (model, string) {
 	t.Helper()
-	home := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(home, ".claude", "settings.json")
-	if err := os.WriteFile(path, []byte(settingsJSON), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("HOME", home)
-
-	var m tea.Model = initialModel(skills, true)
-	m, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, path := homeModelForTest(t, settingsJSON, true, skills)
 	mm := applyKey(t, m, "enter")
 	if mm.view != viewFiles {
 		t.Fatalf("enter did not open the file screen (view=%d)", mm.view)
@@ -274,7 +201,7 @@ func TestFileScreenSetModeSavesImmediately(t *testing.T) {
 	}
 	m, path := enterFileScreenForTest(t, `{"skillOverrides":{}}`, skills)
 	if m.settings == nil {
-		t.Fatal("entering the file screen in --cli mode should load settings")
+		t.Fatal("entering the file screen in --cli mode should have settings loaded")
 	}
 
 	m = applyKey(t, m, "4") // alpha (the open skill) -> off, saved immediately
@@ -300,8 +227,7 @@ func TestFileScreenTitleShowsMode(t *testing.T) {
 
 func TestFileScreenModeKeysInertInDesktopMode(t *testing.T) {
 	skills := []skill{{name: "alpha", dir: t.TempDir()}}
-	var m tea.Model = initialModel(skills, false) // desktop mode
-	m, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, _ := homeModelForTest(t, `{"skillOverrides":{}}`, false, skills)
 	mm := applyKey(t, m, "enter")
 	if mm.view != viewFiles {
 		t.Fatalf("enter should open the file screen, view=%d", mm.view)

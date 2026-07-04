@@ -5,25 +5,19 @@ import (
 	"io"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
-// --- Presentation-mode overview (viewOverrides) ---
+// --- Home-screen table rendering + presentation-mode editing ---
 //
-// A third screen (--cli only) that renders every skill as a dense one-line
-// table row — name | mode | truncated description — so the whole set is
-// skimmable at a glance. Number keys 1-4 set the selected skill's mode directly
-// (no cycle — the cycle in Claude Code's own editor is the annoyance this
-// avoids). Changes are held in memory and marked dirty; leaving with unsaved
-// changes prompts to save.
+// The home screen is a dense one-line-per-skill table. In --cli mode it shows
+// name | mode | description and the number keys 1-4 set the selected skill's
+// mode, saving immediately (no batch, no prompt — the whole tool is "in and
+// out"). In Desktop mode the mode column is dropped and 1-4 do nothing.
 
 var (
-	stylePromptTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7C3AED"))
-	stylePromptHelp  = lipgloss.NewStyle().Foreground(lipgloss.Color("#A78BFA"))
-
 	// Mode colours. off is an angry red on purpose — a nudge that a skill you've
 	// kept hidden for months might as well be removed. The partial-visibility
 	// modes are amber. A fully-on skill is left unstyled so the flagged ones are
@@ -35,27 +29,31 @@ var (
 	styleRowDesc     = lipgloss.NewStyle().Foreground(lipgloss.Color("#6C6C6C"))
 )
 
-// overrideItem is one table row: a skill, plus a pointer to the settings so its
-// mode always reflects the latest in-memory edit.
-type overrideItem struct {
-	name     string
-	desc     string
+// skillRow is one home-table row: a skill plus a pointer to the loaded settings
+// (nil in Desktop mode) so its mode always reflects the latest immediate save.
+type skillRow struct {
+	s        skill
 	settings *skillSettings
 }
 
 // FilterValue matches on name and description both, so "that Laravel one" is
 // findable — not just exact names.
-func (i overrideItem) FilterValue() string { return i.name + " " + i.desc }
+func (i skillRow) FilterValue() string { return i.s.name + " " + i.s.description }
 
-// overrideDelegate renders each item as a single compact table row.
-type overrideDelegate struct{}
+// skillTableDelegate renders each skill as a single compact table row. showMode
+// adds the (colour-coded) presentation-mode column; showLabel prefixes the
+// description with the profile tag (Desktop, multiple profiles only).
+type skillTableDelegate struct {
+	showMode  bool
+	showLabel bool
+}
 
-func (d overrideDelegate) Height() int                         { return 1 }
-func (d overrideDelegate) Spacing() int                        { return 0 }
-func (d overrideDelegate) Update(tea.Msg, *list.Model) tea.Cmd { return nil }
+func (d skillTableDelegate) Height() int                         { return 1 }
+func (d skillTableDelegate) Spacing() int                        { return 0 }
+func (d skillTableDelegate) Update(tea.Msg, *list.Model) tea.Cmd { return nil }
 
-func (d overrideDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
-	it, ok := item.(overrideItem)
+func (d skillTableDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
+	it, ok := item.(skillRow)
 	if !ok {
 		return
 	}
@@ -66,26 +64,34 @@ func (d overrideDelegate) Render(w io.Writer, m list.Model, index int, item list
 		modeW   = 20
 		gap     = 2
 	)
-	// Leave a small right margin so a full row never wraps.
-	descW := m.Width() - 2 - prefixW - nameW - modeW - gap*2
+	used := 2 + prefixW + nameW + gap // right margin + prefix + name + gap
+	if d.showMode {
+		used += modeW + gap
+	}
+	descW := m.Width() - used
 	if descW < 10 {
 		descW = 0 // too narrow for a description column
 	}
 
-	mode := it.settings.mode(it.name)
-	name := padRight(truncateRunes(it.name, nameW), nameW)
-	modeCell := padRight(truncateRunes(string(mode), modeW), modeW)
-
+	name := padRight(truncateRunes(it.s.name, nameW), nameW)
 	prefix := "  "
 	if index == m.Index() {
 		prefix = styleRowSelected.Render("▸ ")
 		name = styleRowSelected.Render(name)
 	}
-	modeCell = modeStyle(mode).Render(modeCell)
 
-	line := prefix + name + strings.Repeat(" ", gap) + modeCell
+	line := prefix + name
+	if d.showMode {
+		mode := it.settings.mode(it.s.name)
+		modeCell := padRight(truncateRunes(string(mode), modeW), modeW)
+		line += strings.Repeat(" ", gap) + modeStyle(mode).Render(modeCell)
+	}
 	if descW > 0 {
-		line += strings.Repeat(" ", gap) + styleRowDesc.Render(truncateRunes(it.desc, descW))
+		desc := it.s.description
+		if d.showLabel {
+			desc = "[" + it.s.profile.label + "] " + desc
+		}
+		line += strings.Repeat(" ", gap) + styleRowDesc.Render(truncateRunes(desc, descW))
 	}
 	fmt.Fprint(w, line)
 }
@@ -125,113 +131,7 @@ func padRight(s string, w int) string {
 	return s
 }
 
-// newOverrideList builds the overview list for the given skills and settings.
-func newOverrideList(skills []skill, settings *skillSettings, width, height int) list.Model {
-	items := make([]list.Item, len(skills))
-	for idx, s := range skills {
-		items[idx] = overrideItem{name: s.name, desc: s.description, settings: settings}
-	}
-
-	l := list.New(items, overrideDelegate{}, width, height)
-	l.Title = "Skill presentation modes"
-	l.SetShowStatusBar(true)
-	l.SetFilteringEnabled(true)
-	l.AdditionalShortHelpKeys = func() []key.Binding {
-		return []key.Binding{
-			key.NewBinding(key.WithKeys("1"), key.WithHelp("1", "on")),
-			key.NewBinding(key.WithKeys("2"), key.WithHelp("2", "name-only")),
-			key.NewBinding(key.WithKeys("3"), key.WithHelp("3", "user-inv")),
-			key.NewBinding(key.WithKeys("4"), key.WithHelp("4", "off")),
-			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc/q", "back")),
-		}
-	}
-	return l
-}
-
-// enterOverrides loads settings.json and switches to the overview screen. On a
-// load error it shows a transient status message and stays on the skill list.
-func (m model) enterOverrides() (tea.Model, tea.Cmd) {
-	settings, err := loadSkillSettings(settingsPath())
-	if err != nil {
-		return m, m.skillList.NewStatusMessage("Could not load settings: " + err.Error())
-	}
-	m.settings = settings
-	m.dirty = false
-	m.confirmingSave = false
-	m.overrideList = newOverrideList(m.skills, settings, m.width, m.height)
-	m.view = viewOverrides
-	return m, nil
-}
-
-// updateOverrides handles all key input while on the overview screen. Called
-// only when not filtering (the caller passes filter keystrokes to the list).
-func (m model) updateOverrides(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// ctrl+c is always a hard bail, saved or not.
-	if msg.String() == "ctrl+c" {
-		m.quitting = true
-		return m, tea.Quit
-	}
-
-	if m.confirmingSave {
-		switch msg.String() {
-		case "y", "Y", "enter":
-			if err := m.settings.save(); err != nil {
-				m.confirmingSave = false
-				return m, m.overrideList.NewStatusMessage("Save failed: " + err.Error())
-			}
-			m.dirty = false
-			m.confirmingSave = false
-			m.view = viewSkills
-			return m, nil
-		case "n", "N":
-			// Discard: leave without saving. Changes evaporate — settings is
-			// reloaded fresh next time the screen is opened.
-			m.dirty = false
-			m.confirmingSave = false
-			m.view = viewSkills
-			return m, nil
-		case "esc":
-			// Cancel the quit; keep editing.
-			m.confirmingSave = false
-			return m, nil
-		}
-		return m, nil // swallow everything else while confirming
-	}
-
-	if mode, ok := presentationModeForKey(msg.String()); ok {
-		return m.setSelectedMode(mode)
-	}
-	switch msg.String() {
-	case "q", "esc":
-		if m.dirty {
-			m.confirmingSave = true
-			return m, nil
-		}
-		m.view = viewSkills
-		return m, nil
-	}
-
-	// Anything else (navigation, starting a filter) goes to the list.
-	var cmd tea.Cmd
-	m.overrideList, cmd = m.overrideList.Update(msg)
-	return m, cmd
-}
-
-// setSelectedMode sets the highlighted skill's mode, marking the model dirty if
-// it actually changed.
-func (m model) setSelectedMode(mode presentationMode) (tea.Model, tea.Cmd) {
-	item, ok := m.overrideList.SelectedItem().(overrideItem)
-	if !ok {
-		return m, nil
-	}
-	if m.settings.setMode(item.name, mode) {
-		m.dirty = true
-	}
-	return m, nil
-}
-
-// presentationModeForKey maps the number keys 1-4 to their modes. Shared by the
-// overview screen and the per-skill file-screen hotkey.
+// presentationModeForKey maps the number keys 1-4 to their modes.
 func presentationModeForKey(s string) (presentationMode, bool) {
 	switch s {
 	case "1":
@@ -246,25 +146,41 @@ func presentationModeForKey(s string) (presentationMode, bool) {
 	return modeOn, false
 }
 
-// setCurrentSkillMode sets the mode of the skill currently open on the file
-// screen and saves immediately — the file screen is about one skill, so a
-// single keypress commits it (unlike the overview, which batches and prompts).
-// Shows a transient status line and refreshes the title so the effect is clear.
+// commitMode sets a skill's mode and saves immediately, returning a status
+// message describing what happened. Shared by the home table and the file
+// screen — immediate-save everywhere, no batching or prompts.
+func (m model) commitMode(name string, mode presentationMode) string {
+	if m.settings == nil {
+		return "No settings.json found — cannot set mode"
+	}
+	if !m.settings.setMode(name, mode) {
+		return fmt.Sprintf("Already %s", mode)
+	}
+	if err := m.settings.save(); err != nil {
+		return "Save failed: " + err.Error()
+	}
+	return fmt.Sprintf("Set to %s (saved)", mode)
+}
+
+// setHomeSkillMode sets the highlighted home-table skill's mode. The row's live
+// settings pointer means the table re-renders the new mode automatically.
+func (m model) setHomeSkillMode(mode presentationMode) (tea.Model, tea.Cmd) {
+	item, ok := m.skillList.SelectedItem().(skillRow)
+	if !ok {
+		return m, nil
+	}
+	return m, m.skillList.NewStatusMessage(m.commitMode(item.s.name, mode))
+}
+
+// setCurrentSkillMode sets the mode of the skill open on the file screen and
+// refreshes the title so the change is visible.
 func (m model) setCurrentSkillMode(mode presentationMode) (tea.Model, tea.Cmd) {
 	if m.current == nil {
 		return m, nil
 	}
-	if m.settings == nil {
-		return m, m.fileList.NewStatusMessage("No settings.json found — cannot set mode")
-	}
-	if !m.settings.setMode(m.current.name, mode) {
-		return m, m.fileList.NewStatusMessage(fmt.Sprintf("Already %s", mode))
-	}
-	if err := m.settings.save(); err != nil {
-		return m, m.fileList.NewStatusMessage("Save failed: " + err.Error())
-	}
+	status := m.commitMode(m.current.name, mode)
 	m.fileList.Title = m.fileTitle(m.current.name)
-	return m, m.fileList.NewStatusMessage(fmt.Sprintf("Set to %s (saved)", mode))
+	return m, m.fileList.NewStatusMessage(status)
 }
 
 // fileTitle builds the file-screen title, appending the skill's current
@@ -274,16 +190,4 @@ func (m model) fileTitle(name string) string {
 		return fmt.Sprintf("%s  files  ·  %s", name, m.settings.mode(name))
 	}
 	return fmt.Sprintf("%s  files", name)
-}
-
-// overrideConfirmView is the "save changes?" prompt shown when leaving the
-// overview with unsaved edits.
-func (m model) overrideConfirmView() string {
-	body := lipgloss.JoinVertical(
-		lipgloss.Center,
-		stylePromptTitle.Render("Save changes to skill presentation modes?"),
-		"",
-		stylePromptHelp.Render("y/enter  save     n  discard     esc  keep editing"),
-	)
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, body)
 }

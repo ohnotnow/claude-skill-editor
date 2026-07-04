@@ -289,24 +289,9 @@ type viewState int
 const (
 	viewSkills viewState = iota
 	viewFiles
-	viewOverrides
 )
 
 // List item adapters
-type skillItem struct{ s skill }
-
-func (i skillItem) Title() string {
-	return i.s.name
-}
-func (i skillItem) Description() string {
-	desc := i.s.description
-	if desc == "" {
-		desc = "(no description)"
-	}
-	return fmt.Sprintf("[%s] %s", i.s.profile.label, desc)
-}
-func (i skillItem) FilterValue() string { return i.s.name + " " + i.s.description }
-
 type fileItem struct{ f skillFile }
 
 func (i fileItem) Title() string       { return i.f.name }
@@ -325,11 +310,9 @@ type model struct {
 	printPath string // set when user presses 'p' — printed after TUI exits
 	cliMode   bool   // true = ~/.claude/skills, terminal editor first
 
-	// Presentation-mode overview (viewOverrides, --cli only)
-	overrideList   list.Model
-	settings       *skillSettings // loaded when entering the overview
-	dirty          bool           // unsaved mode changes
-	confirmingSave bool           // showing the "save changes?" prompt
+	// settings holds ~/.claude/settings.json for presentation-mode editing on
+	// the home table and file screen (--cli only; nil in Desktop mode).
+	settings *skillSettings
 }
 
 type editorFinishedMsg struct{ err error }
@@ -341,18 +324,20 @@ func initialModel(skills []skill, cliMode bool) model {
 		profiles[s.profile.uuid] = true
 	}
 
+	// Presentation modes are a --cli concept; load settings up front so the
+	// home table can show and set them. Best-effort — browsing and editing still
+	// work with no settings.json, just without the mode column.
+	var settings *skillSettings
+	if cliMode {
+		settings, _ = loadSkillSettings(settingsPath())
+	}
+	showMode := cliMode && settings != nil
+	showLabel := !cliMode && len(profiles) > 1
+
 	items := make([]list.Item, len(skills))
 	for i, s := range skills {
-		items[i] = skillItem{s}
+		items[i] = skillRow{s: s, settings: settings}
 	}
-
-	delegate := list.NewDefaultDelegate()
-	delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.
-		Foreground(lipgloss.Color("#7C3AED")).
-		BorderLeftForeground(lipgloss.Color("#7C3AED"))
-	delegate.Styles.SelectedDesc = delegate.Styles.SelectedDesc.
-		Foreground(lipgloss.Color("#A78BFA")).
-		BorderLeftForeground(lipgloss.Color("#7C3AED"))
 
 	var title string
 	if cliMode {
@@ -364,7 +349,7 @@ func initialModel(skills []skill, cliMode bool) model {
 		}
 	}
 
-	sl := list.New(items, delegate, 80, 24)
+	sl := list.New(items, skillTableDelegate{showMode: showMode, showLabel: showLabel}, 80, 24)
 	sl.Title = title
 	sl.SetShowStatusBar(true)
 	sl.SetFilteringEnabled(true)
@@ -375,7 +360,12 @@ func initialModel(skills []skill, cliMode bool) model {
 			key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "print path")),
 		}
 		if cliMode {
-			bindings = append(bindings, key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "presentation modes")))
+			bindings = append(bindings,
+				key.NewBinding(key.WithKeys("1"), key.WithHelp("1", "on")),
+				key.NewBinding(key.WithKeys("2"), key.WithHelp("2", "name-only")),
+				key.NewBinding(key.WithKeys("3"), key.WithHelp("3", "user-inv")),
+				key.NewBinding(key.WithKeys("4"), key.WithHelp("4", "off")),
+			)
 		}
 		return bindings
 	}
@@ -384,6 +374,7 @@ func initialModel(skills []skill, cliMode bool) model {
 		view:      viewSkills,
 		skillList: sl,
 		skills:    skills,
+		settings:  settings,
 		cliMode:   cliMode,
 	}
 }
@@ -401,9 +392,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.current != nil {
 			m.fileList.SetSize(msg.Width, msg.Height)
 		}
-		if m.view == viewOverrides {
-			m.overrideList.SetSize(msg.Width, msg.Height)
-		}
 		return m, nil
 
 	case editorFinishedMsg:
@@ -420,16 +408,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			m.fileList, cmd = m.fileList.Update(msg)
 			return m, cmd
-		}
-		if m.view == viewOverrides {
-			// While filtering, digits belong in the filter box, not to
-			// mode-setting — so pass through untouched.
-			if m.overrideList.FilterState() == list.Filtering {
-				var cmd tea.Cmd
-				m.overrideList, cmd = m.overrideList.Update(msg)
-				return m, cmd
-			}
-			return m.updateOverrides(msg)
 		}
 
 		switch msg.String() {
@@ -449,22 +427,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
-		case "m":
-			if m.view == viewSkills && m.cliMode {
-				return m.enterOverrides()
-			}
-
 		case "1", "2", "3", "4":
-			if m.view == viewFiles && m.cliMode {
+			if m.cliMode {
 				if mode, ok := presentationModeForKey(msg.String()); ok {
-					return m.setCurrentSkillMode(mode)
+					switch m.view {
+					case viewSkills:
+						return m.setHomeSkillMode(mode)
+					case viewFiles:
+						return m.setCurrentSkillMode(mode)
+					}
 				}
 			}
 
 		case "p":
 			switch m.view {
 			case viewSkills:
-				if item, ok := m.skillList.SelectedItem().(skillItem); ok {
+				if item, ok := m.skillList.SelectedItem().(skillRow); ok {
 					m.printPath = item.s.dir
 					m.quitting = true
 					return m, tea.Quit
@@ -482,7 +460,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var dir string
 			switch m.view {
 			case viewSkills:
-				if item, ok := m.skillList.SelectedItem().(skillItem); ok {
+				if item, ok := m.skillList.SelectedItem().(skillRow); ok {
 					dir = item.s.dir
 				}
 			case viewFiles:
@@ -498,16 +476,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			switch m.view {
 			case viewSkills:
-				if item, ok := m.skillList.SelectedItem().(skillItem); ok {
+				if item, ok := m.skillList.SelectedItem().(skillRow); ok {
 					s := item.s
 					m.current = &s
 					m.view = viewFiles
-					// In --cli mode, load settings so the file screen can show
-					// and set this skill's presentation mode. Best-effort — file
-					// editing still works with no settings.json.
-					if m.cliMode {
-						m.settings, _ = loadSkillSettings(settingsPath())
-					}
 					files := listSkillFiles(s.dir)
 					items := make([]list.Item, len(files))
 					for i, f := range files {
@@ -558,16 +530,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	// Pass through to the active list. This also delivers the list's own async
-	// messages (e.g. FilterMatchesMsg from filtering) — key messages for
-	// viewOverrides have already returned early above, so there's no double-handling.
+	// messages (FilterMatchesMsg from filtering), so home and file filtering work.
 	var cmd tea.Cmd
 	switch m.view {
 	case viewSkills:
 		m.skillList, cmd = m.skillList.Update(msg)
 	case viewFiles:
 		m.fileList, cmd = m.fileList.Update(msg)
-	case viewOverrides:
-		m.overrideList, cmd = m.overrideList.Update(msg)
 	}
 	return m, cmd
 }
@@ -579,11 +548,6 @@ func (m model) View() string {
 	switch m.view {
 	case viewFiles:
 		return m.fileList.View()
-	case viewOverrides:
-		if m.confirmingSave {
-			return m.overrideConfirmView()
-		}
-		return m.overrideList.View()
 	default:
 		return m.skillList.View()
 	}
@@ -642,8 +606,7 @@ func main() {
 			fmt.Println("  o       Open skill folder in file manager")
 			fmt.Println("  p       Print path and exit")
 			fmt.Println("  /       Filter list")
-			fmt.Println("  m       Manage skill presentation modes (--cli)")
-			fmt.Println("  1-4     Set a skill's presentation mode")
+			fmt.Println("  1-4     Set a skill's presentation mode (--cli)")
 			fmt.Println("  esc/q   Back / quit")
 			return
 		case "--list":

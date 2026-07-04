@@ -55,15 +55,14 @@ skill-editor --help         Show all options
 | o | Open the skill folder in your file manager |
 | p | Print the full path and exit (useful for scripting) |
 | / | Filter the list |
-| m | Manage skill presentation modes (`--cli` only) |
-| 1–4 | Set a skill's presentation mode (in the modes view, or a skill's file list) |
+| 1–4 | Set a skill's presentation mode — `--cli` only (home table, or a skill's file list) |
 | esc, q | Go back / quit |
 
 The `p` key is handy when you just want the path. The TUI tears down cleanly before printing, so you can pipe or copy the output.
 
 ### Presentation modes (`--cli`)
 
-Claude Code decides how much of each skill it surfaces to itself via the `skillOverrides` map in `~/.claude/settings.json`. In `--cli` mode, press `m` for a filterable table of every skill and its current mode:
+Claude Code decides how much of each skill it surfaces to itself via the `skillOverrides` map in `~/.claude/settings.json`. In `--cli` mode, the home screen **is** that table — every skill listed with its current mode:
 
 | Key | Mode | What Claude sees |
 |-----|------|------------------|
@@ -72,9 +71,9 @@ Claude Code decides how much of each skill it surfaces to itself via the `skillO
 | `3` | user-invocable-only | Nothing — but you can still run it yourself with `/skill-name` |
 | `4` | off | Nothing; hidden entirely |
 
-Move or filter to a skill, hit `1`–`4` to set its mode, then `q` to leave. If you changed anything you'll get a save prompt (`y`/`enter` to save, `n` to discard, `esc` to keep editing) — skim without changing and it won't nag. Setting a skill to `on` simply removes its override, since a skill that's absent from `skillOverrides` is already treated as `on`, so your settings file stays tidy.
+Move or filter to a skill and hit `1`–`4` to set its mode — it saves immediately (no prompt; the red/amber colour tells you it took). Setting a skill to `on` simply removes its override, since a skill that's absent from `skillOverrides` is already treated as `on`, so your settings file stays tidy.
 
-You can also set the mode for a single skill straight from its file list: open it with `enter`, then press `1`–`4`. That path saves immediately.
+You can also set the mode from inside a single skill's file list: open it with `enter`, then press `1`–`4`.
 
 Only the `skillOverrides` block is rewritten — everything else in `settings.json` is left untouched. One caveat: Go's JSON encoder sorts the top-level keys alphabetically when it saves, so don't be alarmed if `permissions` and friends shuffle order.
 
