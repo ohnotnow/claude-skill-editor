@@ -289,6 +289,7 @@ type viewState int
 const (
 	viewSkills viewState = iota
 	viewFiles
+	viewOverrides
 )
 
 // List item adapters
@@ -323,6 +324,12 @@ type model struct {
 	quitting  bool
 	printPath string // set when user presses 'p' — printed after TUI exits
 	cliMode   bool   // true = ~/.claude/skills, terminal editor first
+
+	// Presentation-mode overview (viewOverrides, --cli only)
+	overrideList   list.Model
+	settings       *skillSettings // loaded when entering the overview
+	dirty          bool           // unsaved mode changes
+	confirmingSave bool           // showing the "save changes?" prompt
 }
 
 type editorFinishedMsg struct{ err error }
@@ -362,11 +369,15 @@ func initialModel(skills []skill, cliMode bool) model {
 	sl.SetShowStatusBar(true)
 	sl.SetFilteringEnabled(true)
 	sl.AdditionalShortHelpKeys = func() []key.Binding {
-		return []key.Binding{
+		bindings := []key.Binding{
 			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open skill")),
 			key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "open in finder")),
 			key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "print path")),
 		}
+		if cliMode {
+			bindings = append(bindings, key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "presentation modes")))
+		}
+		return bindings
 	}
 
 	return model{
@@ -390,6 +401,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.current != nil {
 			m.fileList.SetSize(msg.Width, msg.Height)
 		}
+		if m.view == viewOverrides {
+			m.overrideList.SetSize(msg.Width, msg.Height)
+		}
 		return m, nil
 
 	case editorFinishedMsg:
@@ -407,6 +421,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.fileList, cmd = m.fileList.Update(msg)
 			return m, cmd
 		}
+		if m.view == viewOverrides {
+			// While filtering, digits belong in the filter box, not to
+			// mode-setting — so pass through untouched.
+			if m.overrideList.FilterState() == list.Filtering {
+				var cmd tea.Cmd
+				m.overrideList, cmd = m.overrideList.Update(msg)
+				return m, cmd
+			}
+			return m.updateOverrides(msg)
+		}
 
 		switch msg.String() {
 		case "q", "ctrl+c":
@@ -423,6 +447,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.view = viewSkills
 				m.current = nil
 				return m, nil
+			}
+
+		case "m":
+			if m.view == viewSkills && m.cliMode {
+				return m.enterOverrides()
 			}
 
 		case "p":
@@ -510,13 +539,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Pass through to the active list
+	// Pass through to the active list. This also delivers the list's own async
+	// messages (e.g. FilterMatchesMsg from filtering) — key messages for
+	// viewOverrides have already returned early above, so there's no double-handling.
 	var cmd tea.Cmd
 	switch m.view {
 	case viewSkills:
 		m.skillList, cmd = m.skillList.Update(msg)
 	case viewFiles:
 		m.fileList, cmd = m.fileList.Update(msg)
+	case viewOverrides:
+		m.overrideList, cmd = m.overrideList.Update(msg)
 	}
 	return m, cmd
 }
@@ -528,6 +561,11 @@ func (m model) View() string {
 	switch m.view {
 	case viewFiles:
 		return m.fileList.View()
+	case viewOverrides:
+		if m.confirmingSave {
+			return m.overrideConfirmView()
+		}
+		return m.overrideList.View()
 	default:
 		return m.skillList.View()
 	}
