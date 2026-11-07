@@ -56,7 +56,7 @@ skill-editor --help         Show all options
 | enter | Open a skill / edit a file |
 | o | Open the skill folder in your file manager |
 | p | Print the full path and exit (useful for scripting) |
-| / | Filter the list |
+| / | Filter the list: names starting with what you type come first, then names containing it, then skills with a description word starting with it |
 | 1–4 | Set a skill's presentation mode — `--cli` only (home table, or a skill's file list) |
 | esc, q | Go back / quit |
 

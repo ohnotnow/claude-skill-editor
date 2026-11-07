@@ -388,6 +388,7 @@ func initialModel(skills []skill, cliMode bool) model {
 	sl.Title = title
 	sl.SetShowStatusBar(true)
 	sl.SetFilteringEnabled(true)
+	sl.Filter = skillFilter
 	sl.AdditionalShortHelpKeys = func() []key.Binding {
 		bindings := []key.Binding{
 			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open skill")),

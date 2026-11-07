@@ -240,3 +240,56 @@ func TestFileScreenModeKeysInertInDesktopMode(t *testing.T) {
 		t.Error("mode keys should do nothing in desktop mode")
 	}
 }
+
+// skillFilterNames runs skillFilter over rows and returns the matching skill
+// names in the order the filter ranked them.
+func skillFilterNames(term string, rows []skillRow) []string {
+	targets := make([]string, len(rows))
+	for i, r := range rows {
+		targets[i] = r.FilterValue()
+	}
+	var names []string
+	for _, rank := range skillFilter(term, targets) {
+		names = append(names, rows[rank.Index].s.name)
+	}
+	return names
+}
+
+func TestSkillFilter(t *testing.T) {
+	rows := []skillRow{
+		{s: skill{name: "shift:review", description: "Review a pull request made by an automated upgrade"}},
+		{s: skill{name: "wait-for-it", description: "Waits until a port is open"}},
+		{s: skill{name: "ait-recap", description: "Generate a recap of ait work"}},
+		{s: skill{name: "cupcake-migration", description: "Move older apps onto our Docker swarm"}},
+		{s: skill{name: "ait-usage", description: "Local-first issue tracker"}},
+		{s: skill{name: "audience-credibility", description: "Defensible claims"}},
+		{s: skill{name: "trainer", description: "Waits patiently, then trait-checks"}},
+		{s: skill{name: "docker-pro", description: "Containers"}},
+	}
+
+	cases := []struct {
+		term string
+		want []string
+	}{
+		// Name prefix only; no fuzzy scatter-matching across descriptions.
+		{"aud", []string{"audience-credibility"}},
+		// Prefixes first, then names containing it. trainer's description has
+		// "Waits" and "trait", both mid-word, so it does not match.
+		{"ait", []string{"ait-recap", "ait-usage", "wait-for-it"}},
+		// A word-start description match lands after the name matches.
+		{"pull", []string{"shift:review"}},
+		// Description matches come after every name match.
+		{"docker", []string{"docker-pro", "cupcake-migration"}},
+		// Case-insensitive on both sides.
+		{"DOCK", []string{"docker-pro", "cupcake-migration"}},
+		{"zzz", nil},
+	}
+	for _, c := range cases {
+		t.Run(c.term, func(t *testing.T) {
+			got := skillFilterNames(c.term, rows)
+			if strings.Join(got, ",") != strings.Join(c.want, ",") {
+				t.Errorf("skillFilter(%q) = %v, want %v", c.term, got, c.want)
+			}
+		})
+	}
+}

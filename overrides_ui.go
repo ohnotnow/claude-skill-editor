@@ -3,7 +3,10 @@ package main
 import (
 	"fmt"
 	"io"
+	"slices"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
@@ -36,9 +39,53 @@ type skillRow struct {
 	settings *skillSettings
 }
 
-// FilterValue matches on name and description both, so "that Laravel one" is
-// findable — not just exact names.
-func (i skillRow) FilterValue() string { return i.s.name + " " + i.s.description }
+// FilterValue is the name and description separated by a newline, which
+// skillFilter splits apart again (names never contain a newline).
+func (i skillRow) FilterValue() string { return i.s.name + "\n" + i.s.description }
+
+// skillFilter replaces bubbles' default fuzzy filter, which matched letters
+// scattered anywhere in a description. Case-insensitive, ranked in three
+// groups, each kept in list order:
+//  1. names that start with term
+//  2. names that contain term
+//  3. descriptions with a word that starts with term ("docker" finds a skill
+//     about Docker whose name doesn't say so)
+func skillFilter(term string, targets []string) []list.Rank {
+	term = strings.ToLower(term)
+	var groups [3][]list.Rank
+	for i, t := range targets {
+		name, desc, _ := strings.Cut(strings.ToLower(t), "\n")
+		switch {
+		case strings.HasPrefix(name, term):
+			groups[0] = append(groups[0], list.Rank{Index: i})
+		case strings.Contains(name, term):
+			groups[1] = append(groups[1], list.Rank{Index: i})
+		case hasWordStartingWith(desc, term):
+			groups[2] = append(groups[2], list.Rank{Index: i})
+		}
+	}
+	return slices.Concat(groups[0], groups[1], groups[2])
+}
+
+// hasWordStartingWith reports whether term occurs in s at the start of a word:
+// at the beginning of s, or right after a character that isn't a letter or digit.
+func hasWordStartingWith(s, term string) bool {
+	for i := 0; ; {
+		j := strings.Index(s[i:], term)
+		if j < 0 {
+			return false
+		}
+		pos := i + j
+		if pos == 0 {
+			return true
+		}
+		prev, _ := utf8.DecodeLastRuneInString(s[:pos])
+		if !unicode.IsLetter(prev) && !unicode.IsDigit(prev) {
+			return true
+		}
+		i = pos + 1
+	}
+}
 
 // skillTableDelegate renders each skill as a single compact table row. showMode
 // adds the (colour-coded) presentation-mode column; showLabel prefixes the
