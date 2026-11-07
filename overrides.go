@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 )
 
 // presentationMode is a skill's value in the `skillOverrides` map of
@@ -40,6 +41,7 @@ func settingsPath() string {
 type skillSettings struct {
 	path      string
 	raw       map[string]json.RawMessage // every top-level key, verbatim
+	order     []string                   // top-level keys in the order the file had them
 	overrides map[string]string          // parsed skillOverrides: skill name -> value
 }
 
@@ -55,6 +57,11 @@ func loadSkillSettings(path string) (*skillSettings, error) {
 		return nil, fmt.Errorf("cannot parse %s: %w", path, err)
 	}
 
+	order, err := topLevelKeys(data)
+	if err != nil {
+		return nil, fmt.Errorf("cannot parse %s: %w", path, err)
+	}
+
 	overrides := map[string]string{}
 	if rawOverrides, ok := raw[skillOverridesKey]; ok {
 		if err := json.Unmarshal(rawOverrides, &overrides); err != nil {
@@ -62,7 +69,48 @@ func loadSkillSettings(path string) (*skillSettings, error) {
 		}
 	}
 
-	return &skillSettings{path: path, raw: raw, overrides: overrides}, nil
+	return &skillSettings{path: path, raw: raw, order: order, overrides: overrides}, nil
+}
+
+// topLevelKeys returns the keys of the JSON object in data, in file order.
+// A duplicated key is listed once, at its first position.
+func topLevelKeys(data []byte) ([]string, error) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	if tok, err := dec.Token(); err != nil {
+		return nil, err
+	} else if tok != json.Delim('{') {
+		return nil, fmt.Errorf("top level is not a JSON object")
+	}
+
+	var keys []string
+	seen := map[string]bool{}
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		key := tok.(string) // object keys are always strings
+		var skip json.RawMessage
+		if err := dec.Decode(&skip); err != nil {
+			return nil, err
+		}
+		if !seen[key] {
+			seen[key] = true
+			keys = append(keys, key)
+		}
+	}
+	return keys, nil
+}
+
+// encodeString renders s as a JSON string without HTML escaping.
+func encodeString(s string) ([]byte, error) {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(s); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(b.Bytes(), []byte("\n")), nil
 }
 
 // mode returns the presentation mode for a skill. A skill absent from the
@@ -92,11 +140,11 @@ func (s *skillSettings) setMode(skill string, m presentationMode) bool {
 
 // save writes the settings back to disk atomically. Only the skillOverrides key
 // is rewritten from our parsed map; every other top-level key is preserved as
-// it was loaded. When no overrides remain, the key is dropped entirely.
+// it was loaded, in its original position. A newly created skillOverrides goes
+// at the end; when no overrides remain, the key is dropped entirely.
 //
-// Note: Go's encoding/json marshals map keys alphabetically, so the whole file
-// is reordered and reindented on save. This is a deliberately accepted
-// trade-off (see ADR) — no data is lost, only key order and whitespace change.
+// The file is re-indented to two spaces (Claude Code's own style), so a file
+// already in that style only changes where the overrides changed.
 func (s *skillSettings) save() error {
 	if len(s.overrides) == 0 {
 		delete(s.raw, skillOverridesKey)
@@ -106,17 +154,41 @@ func (s *skillSettings) save() error {
 			return fmt.Errorf("cannot encode %s: %w", skillOverridesKey, err)
 		}
 		s.raw[skillOverridesKey] = encoded
+		if !slices.Contains(s.order, skillOverridesKey) {
+			s.order = append(s.order, skillOverridesKey)
+		}
 	}
 
-	// Encode with HTML escaping off so preserved shell commands in hooks
-	// (which may contain >, &, <) survive verbatim rather than as > etc.
+	// Build the object by hand in s.order (a Go map would come out sorted),
+	// then let json.Indent lay it out. Indent copies string contents as they
+	// are, so shell commands in hooks (>, &, <) are not HTML-escaped.
+	var compact bytes.Buffer
+	compact.WriteByte('{')
+	first := true
+	for _, key := range s.order {
+		val, ok := s.raw[key]
+		if !ok {
+			continue
+		}
+		if !first {
+			compact.WriteByte(',')
+		}
+		first = false
+		k, err := encodeString(key)
+		if err != nil {
+			return fmt.Errorf("cannot encode key %q: %w", key, err)
+		}
+		compact.Write(k)
+		compact.WriteByte(':')
+		compact.Write(val)
+	}
+	compact.WriteByte('}')
+
 	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(s.raw); err != nil {
+	if err := json.Indent(&buf, compact.Bytes(), "", "  "); err != nil {
 		return fmt.Errorf("cannot encode settings: %w", err)
 	}
+	buf.WriteByte('\n')
 
 	// Preserve the original file's permission bits.
 	perm := os.FileMode(0o644)

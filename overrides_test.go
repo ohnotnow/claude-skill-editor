@@ -241,6 +241,71 @@ func TestSavePreservesShellCommandsVerbatim(t *testing.T) {
 	}
 }
 
+// A file already in two-space style must come back byte-for-byte, apart from
+// the one override that changed: keys stay in the user's order, not sorted.
+func TestSaveKeepsKeyOrder(t *testing.T) {
+	const src = `{
+  "permissions": {
+    "allow": [
+      "Bash(git status:*)"
+    ]
+  },
+  "skillOverrides": {
+    "foo": "off"
+  },
+  "hooks": {},
+  "env": []
+}
+`
+	path := writeTempSettings(t, src)
+	s, err := loadSkillSettings(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	s.setMode("foo", modeNameOnly)
+	if err := s.save(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	want := strings.Replace(src, `"foo": "off"`, `"foo": "name-only"`, 1)
+	if got := string(readFile(t, path)); got != want {
+		t.Errorf("saved file differs from expected.\n got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// A brand-new skillOverrides key goes at the end, and stays there on later
+// saves rather than drifting.
+func TestSaveAppendsNewOverridesKeyAtEnd(t *testing.T) {
+	path := writeTempSettings(t, `{"zebra": 1, "apple": 2}`)
+	s, err := loadSkillSettings(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	s.setMode("foo", modeOff)
+	if err := s.save(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	s.setMode("bar", modeOff)
+	if err := s.save(); err != nil {
+		t.Fatalf("second save: %v", err)
+	}
+
+	const want = `{
+  "zebra": 1,
+  "apple": 2,
+  "skillOverrides": {
+    "bar": "off",
+    "foo": "off"
+  }
+}
+`
+	if got := string(readFile(t, path)); got != want {
+		t.Errorf("saved file differs from expected.\n got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
 func TestLoadMissingFile(t *testing.T) {
 	if _, err := loadSkillSettings(filepath.Join(t.TempDir(), "nope.json")); err == nil {
 		t.Error("expected an error for a missing settings file")

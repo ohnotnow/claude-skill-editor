@@ -77,7 +77,7 @@ Move or filter to a skill and hit `1`–`4` to set its mode — it saves immedia
 
 You can also set the mode from inside a single skill's file list: open it with `enter`, then press `1`–`4`.
 
-Only the `skillOverrides` block is rewritten — everything else in `settings.json` is left untouched. One caveat: Go's JSON encoder sorts the top-level keys alphabetically when it saves, so don't be alarmed if `permissions` and friends shuffle order.
+Only the `skillOverrides` block is rewritten. Everything else in `settings.json` keeps its content and its place in the file, and a new `skillOverrides` block goes at the end. The file is saved with two-space indentation, which is how Claude Code writes it anyway, so unless you've hand-formatted yours, only the changed line moves.
 
 ### Shell aliases
 
